@@ -1,0 +1,13 @@
+# 用户数据（含机器人 apiKey 明文、账号文件、聊天记录）——绝不提交
+data/
+
+# HTTPS 证书与私钥（首次运行 security/cert.js 会自动生成新证书）
+certs/
+security/certs/
+
+# 日志与临时文件
+*.log
+tmp-*
+
+# 依赖（由 package-lock.json + npm install 还原）
+node_modules/
