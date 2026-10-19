@@ -20,8 +20,8 @@
 
 ```bash
 # 1. 克隆
-git clone https://github.com/你的用户名/chat-room.git
-cd chat-room
+git clone https://github.com/liteae/chatroom.git
+cd chatroom
 
 # 2. 安装依赖（或直接双击 启动聊天室.bat，会自动执行本步）
 npm install
