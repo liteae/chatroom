@@ -70,6 +70,13 @@ Node.js · Express · Socket.IO · bcryptjs · node-forge · 原生 HTML/JS 前�
 - 自签名证书需手动信任，公网部署建议换正式证书并关闭 `BOT_ALLOW_PRIVATE_API`
 - 未包含自动化测试
 
+## 开源
+
+- 仓库地址：[https://github.com/liteae/chatroom](https://github.com/liteae/chatroom)
+- 觉得有用的话欢迎点个 Star ⭐
+- 发现 Bug 或有建议，欢迎提交 [Issue](https://github.com/liteae/chatroom/issues)
+- 欢迎 Fork 与 PR，一起改进这个项目
+
 ## License
 
-MIT
+本项目基于 [MIT License](LICENSE) 开源——可自由使用、修改、分发（含商用），仅需保留版权声明。
