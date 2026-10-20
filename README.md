@@ -66,9 +66,24 @@ Node.js · Express · Socket.IO · bcryptjs · node-forge · 原生 HTML/JS 前�
 
 ## 已知边界
 
-- JSON 文件存储，适合小规模自用与学习，不适合大规模生产部署
+- 适合小规模自用与学习，不适合大规模生产部署
 - 自签名证书需手动信任，公网部署建议换正式证书并关闭 `BOT_ALLOW_PRIVATE_API`
 - 未包含自动化测试
+
+## 分支说明
+
+- `main`：JSON 文件存储（默认，零额外依赖，开箱即用）
+- `sqlite`：SQLite 数据库存储（基于 sql.js，纯 JS 零编译，全部查询走参数化绑定防注入）
+
+使用 sqlite 分支：
+
+```bash
+git checkout sqlite
+npm install
+node server.js
+```
+
+SQLite 版数据落盘为 `data/chatroom.db` 单文件，写入经 2 秒防抖 + 临时文件原子替换，存储层对外 API 与 `main` 分支完全一致。
 
 ## 开源
 

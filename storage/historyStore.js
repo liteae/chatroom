@@ -1,12 +1,9 @@
-// 群历史存储：每群独立文件 + 内存 LRU 缓存 + 字节上限（H1 防内存放大）
-const fs = require('fs');
-const path = require('path');
+// 群历史存储：SQLite group_history 表（id 主键 + data JSON 列存整个历史数组）
+// 内存 LRU 缓存 + 字节上限逻辑完整保留（H1 防内存放大），落盘走 SQL
+const db = require('./db');
 const { GROUP_HISTORY_MAX_BYTES, GROUP_HISTORY_CACHE_MAX, MAX_HISTORY } = require('../config/constants');
-const { atomicWriteJSON } = require('../utils/atomicWrite');
 
-let historyDir = null;
-
-// 群ID格式校验：group_ + 32位hex（防路径穿越）
+// 群ID格式校验：group_ + 32位hex（防注入/防误用）
 function isSafeGroupId(id) {
   if (typeof id !== 'string') return false;
   return /^group_[0-9a-f]{32}$/.test(id);
@@ -19,12 +16,25 @@ function estimateHistoryEntryBytes(entry) {
 
 const historyCache = new Map(); // groupId -> history数组（LRU：Map 尾部为最新）
 const historyBytes = new Map(); // groupId -> 近似序列化字节数
-let historyDirty = new Set();   // 需要写入磁盘的 groupId
-let historySaveTimer = null;    // 防抖定时器
+let historyDirty = new Set();   // 需要写入 SQL 的 groupId
 
-function init({ dataDir }) {
-  historyDir = path.join(dataDir, 'history');
-  if (!fs.existsSync(historyDir)) fs.mkdirSync(historyDir, { recursive: true });
+function init() {}
+
+// 从 SQL 加载某群历史（缓存未命中时调用）
+function loadFromDb(groupId) {
+  const row = db.get('SELECT data FROM group_history WHERE id = ?', [groupId]);
+  if (!row) return [];
+  try {
+    const h = JSON.parse(row.data);
+    return Array.isArray(h) ? h : [];
+  } catch { return []; }
+}
+
+// 写入 SQL（UPSERT 整个数组）
+function saveToDb(groupId) {
+  const history = historyCache.get(groupId);
+  if (!history) return;
+  db.run('INSERT OR REPLACE INTO group_history (id, data) VALUES (?, ?)', [groupId, JSON.stringify(history)]);
 }
 
 function getGroupHistory(groupId) {
@@ -36,25 +46,17 @@ function getGroupHistory(groupId) {
     historyCache.set(groupId, cached);
     return cached;
   }
-  const filePath = path.join(historyDir, `${groupId}.json`);
-  let history = [];
-  try {
-    if (fs.existsSync(filePath)) {
-      history = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (!Array.isArray(history)) history = [];
-    }
-  } catch { history = []; }
+  const history = loadFromDb(groupId);
   historyCache.set(groupId, history);
   let total = 0;
   for (const e of history) total += estimateHistoryEntryBytes(e);
   historyBytes.set(groupId, total);
-  // LRU 逐出：最久未用的群先落盘再移出内存
+  // LRU 逐出：最久未用的群先落库再移出内存
   while (historyCache.size > GROUP_HISTORY_CACHE_MAX) {
     const oldestId = historyCache.keys().next().value;
     if (historyDirty.has(oldestId)) {
-      const h = historyCache.get(oldestId);
-      const fp = path.join(historyDir, `${oldestId}.json`);
-      try { atomicWriteJSON(fp, h); } catch (e) { console.error(`LRU 逐出落盘失败(${oldestId}):`, e.message); }
+      try { saveToDb(oldestId); }
+      catch (e) { console.error(`LRU 逐出落库失败(${oldestId}):`, e.message); }
       historyDirty.delete(oldestId);
     }
     historyCache.delete(oldestId);
@@ -78,31 +80,23 @@ function addGroupHistory(groupId, type, data) {
   }
   historyBytes.set(groupId, Math.max(0, total));
   historyDirty.add(groupId);
-  scheduleHistorySave();
+  // 防抖落盘在 db 层（整库统一 2 秒窗口）
+  db.markDirty();
 }
 
-function scheduleHistorySave() {
-  if (historySaveTimer) return;
-  historySaveTimer = setTimeout(() => {
-    flushHistory();
-    historySaveTimer = null;
-  }, 2000); // 2秒防抖
-}
-
+// 立即落库（进程退出前调用；db.flushNow 负责写磁盘文件）
 function flushHistory() {
   const dirty = [...historyDirty];
   historyDirty.clear();
   for (const groupId of dirty) {
     if (!isSafeGroupId(groupId)) continue;
-    const history = historyCache.get(groupId);
-    if (!history) continue;
-    const filePath = path.join(historyDir, `${groupId}.json`);
     try {
-      atomicWriteJSON(filePath, history);
+      saveToDb(groupId);
     } catch (e) {
       console.error(`保存群聊${groupId}历史失败:`, e.message);
     }
   }
+  db.flushNow();
 }
 
 function deleteGroupHistory(groupId) {
@@ -110,8 +104,7 @@ function deleteGroupHistory(groupId) {
   historyCache.delete(groupId);
   historyBytes.delete(groupId);
   historyDirty.delete(groupId);
-  const filePath = path.join(historyDir, `${groupId}.json`);
-  try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+  db.run('DELETE FROM group_history WHERE id = ?', [groupId]);
 }
 
 module.exports = {

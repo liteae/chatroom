@@ -1,10 +1,8 @@
 // 房间管理：房间表/通用房间/邀请码/成员列表/历史记录/房间信息（自 server.js 顶部房间段）
 // H1 修复：房间历史受条数+字节双上限约束
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const { MAX_HISTORY, ROOM_HISTORY_MAX_BYTES } = require('../config/constants');
-const { atomicWriteJSON } = require('../utils/atomicWrite');
+const db = require('../storage/db');
 const { estimateHistoryEntryBytes } = require('../storage/historyStore');
 const { getGroupsData } = require('../storage/groupsStore');
 const groupManager = require('../groups/groupManager');
@@ -29,21 +27,16 @@ function register(newIo) {
   io = newIo;
 }
 
-let roomsDir = null;
-
-// 信息级2修复：私人聊天室持久化——只保存元数据
+// 信息级2修复：私人聊天室持久化（SQLite rooms 表）——只保存元数据
 // （members 按 socket.id 记录且断线即失，无需持久化；general 固定存在不落盘）
-function init({ dataDir }) {
-  roomsDir = path.join(dataDir, 'rooms');
-  if (!fs.existsSync(roomsDir)) fs.mkdirSync(roomsDir, { recursive: true });
-  let files = [];
-  try { files = fs.readdirSync(roomsDir); } catch { return; }
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    const roomId = file.slice(0, -5);
+function init() {
+  let rows = [];
+  try { rows = db.all('SELECT id, data FROM rooms'); } catch { return; }
+  for (const row of rows) {
+    const roomId = row.id;
     if (roomId === 'general' || !/^room_[0-9a-f]{32}$/.test(roomId) || rooms.has(roomId)) continue;
     try {
-      const meta = JSON.parse(fs.readFileSync(path.join(roomsDir, file), 'utf8'));
+      const meta = JSON.parse(row.data);
       if (!meta || typeof meta.name !== 'string') continue;
       rooms.set(roomId, {
         id: roomId,
@@ -62,23 +55,22 @@ function init({ dataDir }) {
 
 // 保存房间元数据（创建/转让/邀请码权限变更时调用）
 function persistRoom(roomId) {
-  if (!roomsDir) return;
   const room = rooms.get(roomId);
   if (!room || roomId === 'general') return;
-  atomicWriteJSON(path.join(roomsDir, `${roomId}.json`), {
+  db.run('INSERT OR REPLACE INTO rooms (id, data) VALUES (?, ?)', [roomId, JSON.stringify({
     id: room.id,
     name: room.name,
     type: room.type,
     owner: room.owner,
     inviteCode: room.inviteCode,
     inviteViewers: Array.from(room.inviteViewers || [])
-  });
+  })]);
 }
 
-// 删除房间持久化文件（房间销毁时调用）
+// 删除房间持久化记录（房间销毁时调用）
 function removePersistedRoom(roomId) {
-  if (!roomsDir || roomId === 'general') return;
-  try { fs.unlinkSync(path.join(roomsDir, `${roomId}.json`)); } catch {}
+  if (roomId === 'general') return;
+  db.run('DELETE FROM rooms WHERE id = ?', [roomId]);
 }
 
 function getRooms() {

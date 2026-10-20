@@ -21,6 +21,7 @@ const usersStore = require('./storage/usersStore');
 const groupsStore = require('./storage/groupsStore');
 const historyStore = require('./storage/historyStore');
 const uploadsStore = require('./storage/uploadsStore');
+const dbStore = require('./storage/db');
 
 const { registerAuthRoutes } = require('./routes/authRoutes');
 const { registerCaptchaRoutes } = require('./routes/captchaRoutes');
@@ -40,15 +41,10 @@ const { registerSocketAuth, registerAuthEvents } = require('./socket/socketAuth'
 const { registerDisconnectHandler } = require('./socket/connectionManager');
 
 // ==================== 数据目录与存储初始化 ====================
+// SQL 版：先异步初始化 SQLite（加载/创建 data/chatroom.db），各 store 在库就绪后 init
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
-
-usersStore.init({ dataDir });
-groupsStore.init({ dataDir });
-historyStore.init({ dataDir });
-uploadsStore.init({ dataDir });
-friendService.init({ dataDir }); // 内部会初始化 pmHistoryStore
-roomManager.init({ dataDir });   // 恢复持久化的私人聊天室
+const dbReady = dbStore.init(dataDir);
 
 // ==================== 证书（自签叶子） ====================
 const { caCertPem, serverCertPem, serverKeyPem, caCertPath, localIP, allLocalIPs } = initCerts();
@@ -155,28 +151,42 @@ io.on('connection', (socket) => {
 // 定时清理限流记录
 setInterval(() => sweepRateLimits(), 5 * 60 * 1000);
 
-// 服务关闭前保存所有脏数据（群历史 + 私聊历史 + 好友数据）
+// 服务关闭前保存所有脏数据（群历史 + 群数据 + 好友数据 + SQLite 整库落盘）
 function shutdown() {
   historyStore.flushHistory();
   groupsStore.flushGroupsNow();
   friendService.flushAll();
+  dbStore.flushNow();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // ==================== 启动 ====================
-httpServer.listen(PORT, () => {
-  console.log(`HTTP → HTTPS 重定向服务已启动 (端口 ${PORT})`);
-});
+// SQLite 就绪后：初始化各存储模块（含数据加载/恢复），再启动监听
+dbReady.then(() => {
+  usersStore.init({ dataDir });
+  groupsStore.init({ dataDir });
+  historyStore.init({ dataDir });
+  uploadsStore.init({ dataDir });
+  friendService.init({ dataDir }); // 内部会初始化 pmHistoryStore
+  roomManager.init();              // 从 SQLite 恢复持久化的私人聊天室
 
-httpsServer.listen(PORT + 1, () => {
-  console.log('==========================================');
-  console.log('   多人聊天室已启动！(HTTPS)');
-  console.log(`   本机访问: https://localhost:${PORT + 1}`);
-  console.log(`   局域网访问: https://${localIP}:${PORT + 1}`);
+  httpServer.listen(PORT, () => {
+    console.log(`HTTP → HTTPS 重定向服务已启动 (端口 ${PORT})`);
+  });
+
+  httpsServer.listen(PORT + 1, () => {
+    console.log('==========================================');
+    console.log('   多人聊天室已启动！(HTTPS + SQLite)');
+    console.log(`   本机访问: https://localhost:${PORT + 1}`);
+    console.log(`   局域网访问: https://${localIP}:${PORT + 1}`);
   console.log('------------------------------------------');
   // CA 证书自动安装已禁用（H2 修复后为自签叶子证书，无需安装 CA）
   console.log('   浏览器首次访问需手动信任自签证书警告');
   console.log('==========================================');
+  });
+}).catch(err => {
+  console.error('SQLite 初始化失败，服务无法启动:', err);
+  process.exit(1);
 });

@@ -1,71 +1,32 @@
 // 好友服务：好友关系缓存/黑名单判定/注销清理
-// 数据存储：friends/ 目录，每用户一文件 username.json
+// 数据存储：SQLite friends 表（username 主键 + data JSON 列）
 // chat 模块依赖本模块的 isBlocked 做拉黑过滤；本模块不反向依赖 chat
-const fs = require('fs');
-const path = require('path');
-const { withFileLock, atomicWriteJSON } = require('../utils/atomicWrite');
+const db = require('../storage/db');
 const pmHistoryStore = require('../storage/pmHistoryStore');
 
 let ioInstance = null;
-let friendsDir = null;
-let lockFile = null;
 
 // 内存缓存：username -> { friends:Set, pendingSent:Set, pendingReceived:Set, blacklist:Set }
 const friendsCache = new Map();
 let cacheLoaded = false;
 
-// saveAll debounce 相关
-let saveTimer = null;
-let savePending = false;
-
 function init({ dataDir }) {
-  friendsDir = path.join(dataDir, 'friends');
-  lockFile = path.join(dataDir, 'friends.lock');
-  if (!fs.existsSync(friendsDir)) fs.mkdirSync(friendsDir, { recursive: true });
   pmHistoryStore.init({ dataDir });
-  migrateLegacySingleFile(dataDir);
 }
 
 function register(io) {
   ioInstance = io;
 }
 
-// 旧版单文件 friends.json → friends/ 目录（迁移后删除旧文件）
-function migrateLegacySingleFile(dataDir) {
-  const oldFile = path.join(dataDir, 'friends.json');
-  if (!fs.existsSync(oldFile)) return;
-  try {
-    const data = JSON.parse(fs.readFileSync(oldFile, 'utf8'));
-    for (const [username, info] of Object.entries(data)) {
-      const filePath = path.join(friendsDir, `${username}.json`);
-      if (!fs.existsSync(filePath)) {
-        atomicWriteJSON(filePath, {
-          friends: info.friends || [],
-          pendingSent: info.pendingSent || [],
-          pendingReceived: info.pendingReceived || [],
-          blacklist: info.blacklist || []
-        });
-      }
-    }
-    fs.unlinkSync(oldFile);
-    console.log(`已迁移 ${Object.keys(data).length} 个好友记录到 friends/ 目录`);
-  } catch (e) {
-    console.error('friends.json 迁移失败:', e.message);
-  }
-}
-
 function ensureCacheLoaded() {
   if (cacheLoaded) return;
   cacheLoaded = true;
-  let files = [];
-  try { files = fs.readdirSync(friendsDir); } catch { return; }
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    const username = file.slice(0, -5);
-    if (!username) continue;
+  let rows = [];
+  try { rows = db.all('SELECT username, data FROM friends'); } catch { return; }
+  for (const row of rows) {
     try {
-      const info = JSON.parse(fs.readFileSync(path.join(friendsDir, file), 'utf8'));
-      friendsCache.set(username, {
+      const info = JSON.parse(row.data);
+      friendsCache.set(row.username, {
         friends: new Set(info.friends || []),
         pendingSent: new Set(info.pendingSent || []),
         pendingReceived: new Set(info.pendingReceived || []),
@@ -88,6 +49,10 @@ function getUserData(username) {
   return friendsCache.get(username);
 }
 
+// saveAll debounce 相关
+let saveTimer = null;
+let savePending = false;
+
 // debounce 写入，500ms 内多次调用合并为一次
 function saveAll() {
   if (saveTimer) {
@@ -104,12 +69,12 @@ function saveAll() {
   }, 500);
 }
 
-// 写入 friends/ 目录：每个用户一个文件，空条目文件删除
+// 写入 friends 表：UPSERT 有数据的用户，删除空条目（防抖落盘在 db 层）
 function doSave() {
   const toWrite = {};
   const toDelete = [];
   for (const [username, info] of friendsCache) {
-    // 清理空条目，避免内存和文件膨胀
+    // 清理空条目，避免内存和数据膨胀
     if (info.friends.size === 0 && info.pendingSent.size === 0 &&
         info.pendingReceived.size === 0 && info.blacklist.size === 0) {
       friendsCache.delete(username);
@@ -123,18 +88,16 @@ function doSave() {
       blacklist: Array.from(info.blacklist)
     };
   }
-  return withFileLock(lockFile, () => {
-    // 写入/更新有数据的用户
+  try {
     for (const [username, data] of Object.entries(toWrite)) {
-      atomicWriteJSON(path.join(friendsDir, `${username}.json`), data);
+      db.run('INSERT OR REPLACE INTO friends (username, data) VALUES (?, ?)', [username, JSON.stringify(data)]);
     }
-    // 删除空条目文件
     for (const username of toDelete) {
-      try { fs.unlinkSync(path.join(friendsDir, `${username}.json`)); } catch {}
+      db.run('DELETE FROM friends WHERE username = ?', [username]);
     }
-  }).catch(err => {
-    console.error('friends/ 目录写入失败:', err.message);
-  });
+  } catch (err) {
+    console.error('friends 表写入失败:', err.message);
+  }
 }
 
 // 检查 A 是否把 B 拉黑了
